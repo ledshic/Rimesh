@@ -41,9 +41,21 @@ pub struct StatusResponse {
     pub peers: Vec<PeerInfo>,
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(AppState {
+            service: Mutex::new(ServiceHandle::default()),
+        })
+        .invoke_handler(tauri::generate_handler![get_status, connect, disconnect])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
 /// Retrieve the current network status.
 #[tauri::command]
-pub fn get_status(state: State<AppState>) -> Result<StatusResponse, String> {
+fn get_status(state: State<AppState>) -> Result<StatusResponse, String> {
     let svc = state.service.lock().map_err(|e| e.to_string())?;
     if !svc.connected {
         return Err("Not connected".into());
@@ -57,7 +69,7 @@ pub fn get_status(state: State<AppState>) -> Result<StatusResponse, String> {
 
 /// Connect to the Rimesh virtual LAN with the given alias.
 #[tauri::command]
-pub async fn connect(alias: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn connect(alias: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut svc = state.service.lock().map_err(|e| e.to_string())?;
     if svc.connected {
         return Err("Already connected".into());
@@ -79,7 +91,7 @@ pub async fn connect(alias: String, state: State<'_, AppState>) -> Result<(), St
 
 /// Disconnect from the virtual LAN and stop the service sidecar.
 #[tauri::command]
-pub fn disconnect(state: State<AppState>) -> Result<(), String> {
+fn disconnect(state: State<AppState>) -> Result<(), String> {
     let mut svc = state.service.lock().map_err(|e| e.to_string())?;
     svc.connected = false;
     svc.virtual_ip = String::new();
@@ -91,9 +103,8 @@ pub fn disconnect(state: State<AppState>) -> Result<(), String> {
 /// Naive deterministic "UUID-like" string derived from a seed string.
 /// Replaced by a proper UUID crate in production.
 fn uuid_v4_stub(seed: &str) -> String {
-    let hash: u64 = seed
-        .bytes()
-        .enumerate()
-        .fold(0u64, |acc, (i, b)| acc ^ ((b as u64).wrapping_shl((i as u32) % 64)));
+    let hash: u64 = seed.bytes().enumerate().fold(0u64, |acc, (i, b)| {
+        acc ^ ((b as u64).wrapping_shl((i as u32) % 64))
+    });
     format!("{:016x}", hash)
 }
