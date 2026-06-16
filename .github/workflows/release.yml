@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────
+  # Build Go sidecar binaries
+  # ─────────────────────────────────────────
+  go-service:
+    name: Build Go service (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+    defaults:
+      run:
+        working-directory: service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: service/go.sum
+
+      - name: Build sidecar binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: >
+          go build
+          -trimpath
+          -ldflags="-s -w -X main.version=${{ github.ref_name }}"
+          -o ../src-tauri/binaries/rimesh-service-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          ./cmd/rimesh-service
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rimesh-service-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: src-tauri/binaries/rimesh-service-*
+
+  # ─────────────────────────────────────────
+  # Build and publish Tauri app
+  # ─────────────────────────────────────────
+  release:
+    name: Release (${{ matrix.platform }})
+    needs: go-service
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - platform: macos-aarch64
+            os: macos-latest
+            rust-target: aarch64-apple-darwin
+            go-artifact: rimesh-service-darwin-arm64
+          - platform: windows-x64
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            go-artifact: rimesh-service-windows-amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.go-artifact }}
+          path: src-tauri/binaries
+
+      # macOS: import Developer ID certificate for notarisation
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'macos-aarch64'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS notarisation
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows code signing (optional)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Rimesh ${{ github.ref_name }}'
+          releaseBody: |
+            ## What's new
+            See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ## Downloads
+            | Platform | File |
+            |---|---|
+            | macOS Apple Silicon | `Rimesh_*_aarch64.dmg` |
+            | Windows 11+ (x64) | `Rimesh_*_x64-setup.exe` |
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.rust-target }}
