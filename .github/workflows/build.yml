@@ -1,0 +1,129 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─────────────────────────────────────────
+  # Go service
+  # ─────────────────────────────────────────
+  go-service:
+    name: Go service (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest   # Apple Silicon runner
+            goos: darwin
+            goarch: arm64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+    defaults:
+      run:
+        working-directory: service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: service/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: Build sidecar binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: >
+          go build
+          -trimpath
+          -ldflags="-s -w"
+          -o ../src-tauri/binaries/rimesh-service-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          ./cmd/rimesh-service
+
+      - name: Upload sidecar binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rimesh-service-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: src-tauri/binaries/rimesh-service-*
+          retention-days: 7
+
+  # ─────────────────────────────────────────
+  # Tauri desktop app
+  # ─────────────────────────────────────────
+  tauri:
+    name: Tauri app (${{ matrix.platform }})
+    needs: go-service
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - platform: macos-aarch64
+            os: macos-latest
+            rust-target: aarch64-apple-darwin
+            go-artifact: rimesh-service-darwin-arm64
+          - platform: windows-x64
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            go-artifact: rimesh-service-windows-amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Download Go sidecar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.go-artifact }}
+          path: src-tauri/binaries
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target ${{ matrix.rust-target }}
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rimesh-app-${{ matrix.platform }}
+          path: |
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.msi
+          retention-days: 7
